@@ -1,0 +1,575 @@
+import re
+import os
+import zipfile
+import xml.etree.ElementTree as ET
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from tkinter.scrolledtext import ScrolledText
+import threading
+from datetime import datetime
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
+import csv
+
+
+class ExcelProcessorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Excel Comment Processor - Extract Names & LOGICAL Entries")
+        self.root.geometry("1000x700")
+
+        # Set icon if available (optional)
+        try:
+            self.root.iconbitmap('icon.ico')
+        except:
+            pass
+
+        # Variables
+        self.input_file_path = tk.StringVar()
+        self.output_file_path = tk.StringVar()
+        self.is_processing = False
+
+        # Create GUI
+        self.create_widgets()
+
+        # Center the window
+        self.center_window()
+
+    def center_window(self):
+        """Center the window on screen"""
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.root.winfo_screenheight() // 2) - (height // 2)
+        self.root.geometry(f'{width}x{height}+{x}+{y}')
+
+    def create_widgets(self):
+        """Create all GUI widgets"""
+        # Main container
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Configure grid weights
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(4, weight=1)
+
+        # Title
+        title_label = ttk.Label(main_frame, text="Excel Comment Processor",
+                                font=('Arial', 16, 'bold'))
+        title_label.grid(row=0, column=0, pady=(0, 20))
+
+        # Description
+        desc_text = """This tool extracts:
+• Names from pattern [name][NOC] that have associated LOGICAL entries
+• LOGICAL entries ([LOGICAL_*] or LOGICAL_*) - case insensitive
+• Only names with LOGICAL entries are included in the output
+
+Supported Input Formats: Excel (.xlsx, .xls) or CSV (.csv)
+Output Format: Excel (.xlsx) with professional formatting"""
+
+        desc_label = ttk.Label(main_frame, text=desc_text, justify=tk.LEFT)
+        desc_label.grid(row=1, column=0, pady=(0, 20), sticky=tk.W)
+
+        # Input file selection
+        input_frame = ttk.LabelFrame(main_frame, text="Input File", padding="10")
+        input_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        input_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(input_frame, text="File (Excel or CSV):").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        ttk.Entry(input_frame, textvariable=self.input_file_path, width=60).grid(row=0, column=1, sticky=(tk.W, tk.E))
+        ttk.Button(input_frame, text="Browse", command=self.browse_input_file).grid(row=0, column=2, padx=(5, 0))
+
+        # Output file selection
+        output_frame = ttk.LabelFrame(main_frame, text="Output File", padding="10")
+        output_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        output_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(output_frame, text="Save as Excel:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        ttk.Entry(output_frame, textvariable=self.output_file_path, width=60).grid(row=0, column=1, sticky=(tk.W, tk.E))
+        ttk.Button(output_frame, text="Browse", command=self.browse_output_file).grid(row=0, column=2, padx=(5, 0))
+
+        # Progress bar and status
+        progress_frame = ttk.Frame(main_frame)
+        progress_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        progress_frame.columnconfigure(0, weight=1)
+
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var,
+                                            maximum=100, length=400)
+        self.progress_bar.grid(row=0, column=0, sticky=(tk.W, tk.E))
+
+        self.status_label = ttk.Label(progress_frame, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_label.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=5, column=0, pady=(0, 10))
+
+        self.process_button = ttk.Button(button_frame, text="Process File",
+                                         command=self.process_file, width=20)
+        self.process_button.grid(row=0, column=0, padx=(0, 10))
+
+        ttk.Button(button_frame, text="Clear", command=self.clear_fields, width=20).grid(row=0, column=1, padx=(0, 10))
+        ttk.Button(button_frame, text="Exit", command=self.root.quit, width=20).grid(row=0, column=2)
+
+        # Log/Preview area
+        log_frame = ttk.LabelFrame(main_frame, text="Processing Log & Preview", padding="10")
+        log_frame.grid(row=6, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+
+        self.log_text = ScrolledText(log_frame, height=15, width=80, wrap=tk.WORD)
+        self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Configure text tags for colored output
+        self.log_text.tag_config("success", foreground="green")
+        self.log_text.tag_config("error", foreground="red")
+        self.log_text.tag_config("info", foreground="blue")
+        self.log_text.tag_config("warning", foreground="orange")
+
+        # Status bar
+        self.status_bar = ttk.Label(self.root, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.grid(row=1, column=0, sticky=(tk.W, tk.E))
+
+    def browse_input_file(self):
+        """Browse for input Excel or CSV file"""
+        filename = filedialog.askopenfilename(
+            title="Select File",
+            filetypes=[
+                ("All supported files", "*.xlsx *.xls *.csv"),
+                ("Excel files", "*.xlsx *.xls"),
+                ("CSV files", "*.csv"),
+                ("All files", "*.*")
+            ]
+        )
+        if filename:
+            self.input_file_path.set(filename)
+            # Auto-generate output filename as Excel
+            base_name = os.path.splitext(filename)[0]
+            self.output_file_path.set(f"{base_name}_processed.xlsx")
+            self.log_message(f"Selected input file: {filename}", "info")
+
+            # Detect file type
+            if filename.lower().endswith('.csv'):
+                self.log_message("Detected CSV input file", "info")
+            else:
+                self.log_message("Detected Excel input file", "info")
+
+    def browse_output_file(self):
+        """Browse for output Excel file"""
+        filename = filedialog.asksaveasfilename(
+            title="Save Output File As",
+            defaultextension=".xlsx",
+            initialfile="processed_output.xlsx",
+            filetypes=[
+                ("Excel files", "*.xlsx"),
+                ("All files", "*.*")
+            ]
+        )
+        if filename:
+            # Ensure .xlsx extension
+            if not filename.endswith('.xlsx'):
+                filename += '.xlsx'
+            self.output_file_path.set(filename)
+            self.log_message(f"Output will be saved to: {filename}", "info")
+
+    def clear_fields(self):
+        """Clear all fields"""
+        self.input_file_path.set("")
+        self.output_file_path.set("")
+        self.log_text.delete(1.0, tk.END)
+        self.progress_var.set(0)
+        self.status_label.config(text="Ready")
+        self.status_bar.config(text="Ready")
+        self.log_message("All fields cleared", "info")
+
+    def log_message(self, message, tag=None):
+        """Add a message to the log area"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted_msg = f"[{timestamp}] {message}\n"
+
+        self.log_text.insert(tk.END, formatted_msg)
+        if tag:
+            # Apply tag to the last line
+            line_start = self.log_text.index("end-2l linestart")
+            line_end = self.log_text.index("end-1c")
+            self.log_text.tag_add(tag, line_start, line_end)
+
+        self.log_text.see(tk.END)
+        self.root.update_idletasks()
+
+    def update_progress(self, current, total):
+        """Update progress bar"""
+        if total > 0:
+            progress = (current / total) * 100
+            self.progress_var.set(progress)
+            self.status_label.config(text=f"Processing: {current} of {total} records")
+            self.status_bar.config(text=f"Processing: {current} of {total} records")
+            self.root.update_idletasks()
+
+    def extract_names_and_logical(self, comment):
+        """Extract names and LOGICAL comments"""
+        if not comment or not isinstance(comment, str):
+            return None, None
+
+        # Find all occurrences of [name][NOC] pattern
+        name_pattern = r'\[([^\]]+)\]\[NOC\]'
+        name_matches = list(re.finditer(name_pattern, comment))
+
+        if not name_matches:
+            return None, None
+
+        # Find all LOGICAL entries
+        logical_pattern = r'\[?(LOGICAL_[A-Za-z_]+)\]?'
+        logical_matches = list(re.finditer(logical_pattern, comment))
+
+        # Associate names with logical entries
+        names_with_logical = []
+
+        for i, name_match in enumerate(name_matches):
+            name = name_match.group(1)
+            name_end_pos = name_match.end()
+
+            # Determine end position for this name's logical entries
+            if i + 1 < len(name_matches):
+                end_pos = name_matches[i + 1].start()
+            else:
+                end_pos = len(comment)
+
+            # Find logical entries between current name and next name
+            logical_entries = []
+            for logical_match in logical_matches:
+                logical_pos = logical_match.start()
+                if name_end_pos <= logical_pos < end_pos:
+                    logical_entries.append(logical_match.group(1))
+
+            if logical_entries:
+                # Remove duplicates
+                seen = set()
+                unique_logical = []
+                for item in logical_entries:
+                    if item not in seen:
+                        seen.add(item)
+                        unique_logical.append(item)
+
+                names_with_logical.append({
+                    'name': name,
+                    'logical': ', '.join(unique_logical)
+                })
+
+        if not names_with_logical:
+            return None, None
+
+        # Combine all names and logical entries
+        all_names = ', '.join([item['name'] for item in names_with_logical])
+        all_logical = ', '.join([item['logical'] for item in names_with_logical])
+
+        return all_names, all_logical
+
+    def read_csv_file(self, file_path):
+        """Read CSV file and return data similar to Excel structure"""
+        try:
+            data = []
+            with open(file_path, 'r', encoding='utf-8-sig') as csvfile:
+                reader = csv.reader(csvfile)
+
+                # Read header row
+                headers = next(reader)
+
+                # Create first row with column references (simulate Excel structure)
+                first_row = {}
+                for idx, header in enumerate(headers):
+                    # Use Excel-like column letters (A, B, C, ...)
+                    col_letter = chr(65 + idx) if idx < 26 else chr(65 + idx // 26 - 1) + chr(65 + idx % 26)
+                    first_row[col_letter] = header
+                data.append(first_row)
+
+                # Read data rows
+                for row_idx, row in enumerate(reader, 2):
+                    row_data = {}
+                    for idx, value in enumerate(row):
+                        col_letter = chr(65 + idx) if idx < 26 else chr(65 + idx // 26 - 1) + chr(65 + idx % 26)
+                        row_data[col_letter] = value
+                    data.append(row_data)
+
+            return data
+        except Exception as e:
+            self.log_message(f"Error reading CSV file: {str(e)}", "error")
+            return None
+
+    def read_excel_file(self, file_path):
+        """Read Excel file using standard library"""
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                # Read shared strings
+                strings = []
+                try:
+                    with zip_ref.open('xl/sharedStrings.xml') as strings_file:
+                        tree = ET.parse(strings_file)
+                        root = tree.getroot()
+                        ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+                        for si in root.findall('.//main:si', ns):
+                            t = si.find('.//main:t', ns)
+                            if t is not None and t.text:
+                                strings.append(t.text)
+                            else:
+                                strings.append('')
+                except:
+                    pass
+
+                # Read worksheet
+                with zip_ref.open('xl/worksheets/sheet1.xml') as sheet_file:
+                    tree = ET.parse(sheet_file)
+                    root = tree.getroot()
+                    ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+                    data = []
+                    for row in root.findall('.//main:row', ns):
+                        row_data = {}
+                        for cell in row.findall('.//main:c', ns):
+                            cell_ref = cell.get('r')
+                            cell_value = cell.find('.//main:v', ns)
+
+                            if cell_value is not None:
+                                value = cell_value.text
+                                if cell.get('t') == 's' and value:
+                                    idx = int(value)
+                                    if idx < len(strings):
+                                        value = strings[idx]
+                                row_data[cell_ref] = value
+                        if row_data:
+                            data.append(row_data)
+                    return data
+        except Exception as e:
+            self.log_message(f"Error reading Excel file: {str(e)}", "error")
+            return None
+
+    def read_input_file(self, file_path):
+        """Detect file type and read accordingly"""
+        if file_path.lower().endswith('.csv'):
+            self.log_message("Reading CSV file...", "info")
+            return self.read_csv_file(file_path)
+        else:
+            self.log_message("Reading Excel file...", "info")
+            return self.read_excel_file(file_path)
+
+    def save_to_excel(self, output_file, headers, data):
+        """Save data to Excel file with formatting"""
+        try:
+            # Create workbook and worksheet
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Processed Data"
+
+            # Write headers with formatting
+            header_font = Font(bold=True, color="FFFFFF")
+            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+            header_alignment = Alignment(horizontal="center", vertical="center")
+
+            for col_idx, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col_idx, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+
+            # Write data rows
+            for row_idx, row_data in enumerate(data, 2):
+                for col_idx, value in enumerate(row_data, 1):
+                    cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                    cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+            # Auto-adjust column widths
+            for column in ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                ws.column_dimensions[column_letter].width = adjusted_width
+
+            # Freeze header row
+            ws.freeze_panes = 'A2'
+
+            # Save the workbook
+            wb.save(output_file)
+            return True
+        except Exception as e:
+            self.log_message(f"Error saving Excel file: {str(e)}", "error")
+            return False
+
+    def process_file_thread(self):
+        """Process the Excel or CSV file in a separate thread"""
+        try:
+            input_file = self.input_file_path.get()
+            output_file = self.output_file_path.get()
+
+            if not input_file:
+                self.log_message("Please select an input file!", "error")
+                return
+
+            if not os.path.exists(input_file):
+                self.log_message(f"Input file not found: {input_file}", "error")
+                return
+
+            if not output_file:
+                base_name = os.path.splitext(input_file)[0]
+                output_file = f"{base_name}_processed.xlsx"
+                self.output_file_path.set(output_file)
+
+            # Read input file (handles both Excel and CSV)
+            data = self.read_input_file(input_file)
+
+            if not data:
+                self.log_message("Could not read input file", "error")
+                return
+
+            # Find headers
+            first_row = data[0] if data else {}
+
+            # Extract column names
+            col_names = {}
+            for cell_ref, value in first_row.items():
+                col_letter = ''.join([c for c in cell_ref if c.isalpha()])
+                col_names[col_letter] = value
+
+            # Find scomm_comments column
+            comment_col = None
+            ticket_col = None
+
+            for col_letter, col_name in col_names.items():
+                if col_name and col_name.lower() == 'scomm_comments':
+                    comment_col = col_letter
+                elif col_name and col_name.lower() == 'ticket_id':
+                    ticket_col = col_letter
+
+            if not comment_col:
+                self.log_message("Error: 'scomm_comments' column not found", "error")
+                self.log_message(f"Available columns: {list(col_names.values())}", "info")
+                return
+
+            # Process data rows
+            output_data = []
+            output_headers = ['ticket_id' if ticket_col else 'Row_ID',
+                              'scomm_comments', 'extracted_name', 'logical_work_type']
+
+            # Add other original headers
+            for col_name in col_names.values():
+                if col_name and col_name.lower() not in ['scomm_comments', 'ticket_id']:
+                    output_headers.append(col_name)
+
+            total_records = len(data) - 1
+            self.log_message(f"Found {total_records} records to process", "info")
+
+            for row_idx, row in enumerate(data[1:], 2):
+                # Find comment
+                comment = None
+                for cell_ref, value in row.items():
+                    if cell_ref.startswith(comment_col):
+                        comment = value
+                        break
+
+                # Extract names and logical comments
+                names, logical = self.extract_names_and_logical(comment)
+
+                # Create output row
+                output_row = []
+
+                # Add ticket_id or row number
+                if ticket_col:
+                    ticket_value = None
+                    for cell_ref, value in row.items():
+                        if cell_ref.startswith(ticket_col):
+                            ticket_value = value
+                            break
+                    output_row.append(ticket_value if ticket_value else f"ROW_{row_idx - 1}")
+                else:
+                    output_row.append(f"ROW_{row_idx - 1}")
+
+                # Add comment
+                output_row.append(comment if comment else '')
+
+                # Add extracted data
+                output_row.append(names if names else '')
+                output_row.append(logical if logical else '')
+
+                # Add other columns
+                for col_letter, col_name in col_names.items():
+                    if col_letter != comment_col and (not ticket_col or col_letter != ticket_col):
+                        value = None
+                        for cell_ref, cell_value in row.items():
+                            if cell_ref.startswith(col_letter):
+                                value = cell_value
+                                break
+                        output_row.append(value if value else '')
+
+                output_data.append(output_row)
+
+                # Update progress
+                if row_idx % 100 == 0:
+                    self.update_progress(row_idx - 1, total_records)
+
+            # Save to Excel
+            self.log_message("Saving to Excel file...", "info")
+            success = self.save_to_excel(output_file, output_headers, output_data)
+
+            if success:
+                self.update_progress(total_records, total_records)
+                self.log_message(f"✓ Processing complete! Total records processed: {len(output_data)}", "success")
+                self.log_message(f"✓ Output saved to: {output_file}", "success")
+
+                # Show preview
+                self.log_message("\n" + "=" * 60, "info")
+                self.log_message("PREVIEW OF PROCESSED DATA (First 5 rows):", "info")
+                self.log_message("=" * 60, "info")
+
+                for i, row in enumerate(output_data[:5]):
+                    preview = f"Row {i + 1}: Name='{row[2]}' | LOGICAL='{row[3]}'"
+                    self.log_message(preview, "info")
+
+                self.status_label.config(text="Processing complete!")
+                self.status_bar.config(text="Processing complete!")
+            else:
+                self.log_message("Failed to save Excel file", "error")
+
+        except Exception as e:
+            self.log_message(f"Error: {str(e)}", "error")
+            import traceback
+            self.log_message(traceback.format_exc(), "error")
+        finally:
+            self.is_processing = False
+            self.process_button.config(state="normal")
+
+    def process_file(self):
+        """Start processing the file in a separate thread"""
+        if self.is_processing:
+            self.log_message("Processing already in progress...", "warning")
+            return
+
+        self.is_processing = True
+        self.process_button.config(state="disabled")
+        self.progress_var.set(0)
+        self.status_label.config(text="Processing...")
+        self.status_bar.config(text="Processing...")
+
+        # Start processing in a separate thread
+        thread = threading.Thread(target=self.process_file_thread)
+        thread.daemon = True
+        thread.start()
+
+
+def main():
+    """Main function to run the application"""
+    root = tk.Tk()
+    app = ExcelProcessorApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
